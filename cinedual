@@ -135,21 +135,31 @@ cleanup() {
 
 # Start playback with two audio tracks
 play_mode() {
-    if [ "$#" -ne 3 ]; then
-        echo "Usage: $0 play <movie_file> <video_aid> <audio_only_aid>"
+    # Set default audio tracks
+    VIDEO_AID="1"        # Default: Audio track 1 for video instance
+    AUDIO_ONLY_AID="2"   # Default: Audio track 2 for audio-only instance
+    
+    # Check argument count
+    if [ "$#" -eq 1 ]; then
+        # Only movie file provided, use defaults for audio tracks
+        MOVIE="$1"
+        echo -e "${BLUE}Using default audio tracks: Video=${GREEN}${VIDEO_AID}${BLUE}, Audio-only=${GREEN}${AUDIO_ONLY_AID}${NC}"
+    elif [ "$#" -eq 3 ]; then
+        # Movie file and both audio tracks provided
+        MOVIE="$1"
+        VIDEO_AID="$2"
+        AUDIO_ONLY_AID="$3"
+    else
+        echo "Usage: $0 play <movie_file> [<video_aid> <audio_only_aid>]"
         echo "  <movie_file>: Path to the video file."
-        echo "  <video_aid>: Audio track ID for the video player."
-        echo "  <audio_only_aid>: Audio track ID for the audio-only player."
+        echo "  <video_aid>: Audio track ID for the video player (default: 1)."
+        echo "  <audio_only_aid>: Audio track ID for the audio-only player (default: 2)."
         echo ""
         echo "You will be prompted to select audio sinks interactively."
         echo ""
         echo "To find audio track IDs, run: mpv --list-tracks \"movie.mkv\""
         exit 1
     fi
-
-    MOVIE="$1"
-    VIDEO_AID="$2"      # Audio ID for the instance with video
-    AUDIO_ONLY_AID="$3" # Audio ID for the instance without video
 
     # Check if movie file exists
     if [ ! -f "$MOVIE" ]; then
