@@ -216,7 +216,12 @@ play_mode() {
     done
 
     # Start playback with delay compensation
-    if (( $(echo "$DELAY_COMPENSATION > 0" | bc -l) )); then
+    if (( $(echo "$DELAY_COMPENSATION > -0.001 && $DELAY_COMPENSATION < 0.001" | bc -l) )); then
+        # If delay is effectively zero, start both players simultaneously
+        echo -e "${BLUE}Starting both players simultaneously (delay compensation is effectively zero)...${NC}"
+        mpv_ipc_cmd "$MPVIPC1" '["set_property", "pause", false]'
+        mpv_ipc_cmd "$MPVIPC2" '["set_property", "pause", false]'
+    elif (( $(echo "$DELAY_COMPENSATION > 0" | bc -l) )); then
         # Positive delay: delay the audio-only player
         echo -e "${BLUE}Starting playback with ${DELAY_COMPENSATION}s delay to audio-only player...${NC}"
         
