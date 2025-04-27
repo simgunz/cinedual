@@ -1,0 +1,509 @@
+#!/usr/bin/env bash
+
+# CineDual - Unified script for dual audio playback with MPV
+
+set -e # Exit on error
+
+# --- Color definitions ---
+BLUE='\033[0;34m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
+
+# --- Configuration ---
+DELAY_COMPENSATION=0.2  # Default: 200ms delay for audio-only player
+DELAY_STEP=0.1          # Amount to adjust delay when using +/- modifiers
+
+# Fixed paths for IPC sockets (assuming only one movie can run at a time)
+MPVIPC1="/tmp/cinedual_video.ipc"
+MPVIPC2="/tmp/cinedual_audio.ipc"
+
+# Config file for persistent delay settings
+CONFIG_DIR="${HOME}/.config/cinedual"
+mkdir -p "$CONFIG_DIR" 2>/dev/null
+CONFIG_FILE="${CONFIG_DIR}/settings.conf"
+
+# --- Common Functions ---
+
+# Check dependencies
+check_dependencies() {
+    local missing=0
+    
+    if ! command -v mpv &> /dev/null; then
+        echo -e "${RED}Error: mpv could not be found. Please install it.${NC}"
+        missing=1
+    fi
+    
+    if ! command -v socat &> /dev/null; then
+        echo -e "${RED}Error: socat could not be found. Please install it.${NC}"
+        missing=1
+    fi
+    
+    if ! command -v bc &> /dev/null; then
+        echo -e "${RED}Error: bc could not be found. Please install it.${NC}"
+        missing=1
+    fi
+    
+    if [ "$1" = "play" ] && ! command -v fzf &> /dev/null; then
+        echo -e "${RED}Error: fzf could not be found. Please install it.${NC}"
+        missing=1
+    fi
+    
+    if [ "$1" = "play" ] && ! command -v pactl &> /dev/null; then
+        echo -e "${RED}Error: pactl could not be found. Please install pulseaudio-utils (or ensure PipeWire provides it).${NC}"
+        missing=1
+    fi
+    
+    if [ $missing -eq 1 ]; then
+        exit 1
+    fi
+}
+
+# Load delay compensation
+load_delay_compensation() {
+    # Load saved delay setting if it exists
+    if [ -f "$CONFIG_FILE" ]; then
+        saved_delay=$(cat "$CONFIG_FILE" 2>/dev/null)
+        if [[ "$saved_delay" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
+            DELAY_COMPENSATION=$saved_delay
+            echo -e "${GREEN}Loaded saved delay compensation: ${DELAY_COMPENSATION}s${NC}"
+        fi
+    else
+        # Create default config if it doesn't exist
+        mkdir -p "$CONFIG_DIR" 2>/dev/null
+        echo "$DELAY_COMPENSATION" > "$CONFIG_FILE"
+        echo -e "${GREEN}Using default delay compensation: ${DELAY_COMPENSATION}s${NC}"
+    fi
+}
+
+# Function to send commands to MPV via IPC
+mpv_ipc_cmd() {
+    local socket="$1"
+    local command="$2"
+    echo "{\"command\": $command}" | socat - UNIX-CONNECT:"$socket" > /dev/null 2>&1
+    local status=$?
+    if [ $status -ne 0 ]; then
+        echo -e "${YELLOW}Warning: socat command failed with status $status for socket $socket${NC}"
+    fi
+    return $status
+}
+
+# --- Play Mode Functions ---
+
+# Function to select audio device using fzf
+select_sink() {
+    local prompt=$1
+    
+    # Create a temporary file to store device info
+    local tmpfile=$(mktemp)
+    
+    # Get sink list with descriptions
+    pactl list short sinks | while IFS=$'\t' read -r index name module; do
+        # Skip null devices
+        if [[ $name != *"null"* ]]; then
+            local description=$(pactl list sinks | grep -A1 "Name: $name" | grep "Description:" | cut -d: -f2- | xargs)
+            echo -e "${name}\t${description}" >> "$tmpfile"
+        fi
+    done
+    
+    # Use fzf for selection if there's data in the tmpfile
+    local selection=""
+    if [ -s "$tmpfile" ]; then
+        selection=$(cat "$tmpfile" | fzf --prompt="$prompt > " \
+            --header="Use arrow keys or type to search. Press Enter to select." \
+            --delimiter='\t' \
+            --with-nth=2 \
+            --preview-window=hidden)
+    fi
+    rm "$tmpfile"
+    
+    if [ -n "$selection" ]; then
+        echo "$selection" | cut -f1
+        return 0
+    else
+        echo "" # Return empty string if no selection
+        return 1
+    fi
+}
+
+# Function to clean up IPC sockets on exit
+cleanup() {
+    echo -e "${BLUE}Cleaning up IPC sockets...${NC}"
+    rm -f "$MPVIPC1" "$MPVIPC2"
+}
+
+# Start playback with two audio tracks
+play_mode() {
+    if [ "$#" -ne 3 ]; then
+        echo "Usage: $0 play <movie_file> <video_aid> <audio_only_aid>"
+        echo "  <movie_file>: Path to the video file."
+        echo "  <video_aid>: Audio track ID for the video player."
+        echo "  <audio_only_aid>: Audio track ID for the audio-only player."
+        echo ""
+        echo "You will be prompted to select audio sinks interactively."
+        echo ""
+        echo "To find audio track IDs, run: mpv --list-tracks \"movie.mkv\""
+        exit 1
+    fi
+
+    MOVIE="$1"
+    VIDEO_AID="$2"      # Audio ID for the instance with video
+    AUDIO_ONLY_AID="$3" # Audio ID for the instance without video
+
+    # Check if movie file exists
+    if [ ! -f "$MOVIE" ]; then
+        echo -e "${RED}Error: Movie file not found: $MOVIE${NC}"
+        exit 1
+    fi
+
+    # Load delay compensation settings
+    load_delay_compensation
+
+    # --- Select sinks using fzf ---
+    echo -e "${BLUE}Select sink for Video Player (with audio track $VIDEO_AID):${NC}"
+    SINK_1=$(select_sink "Video Player Sink")
+    if [ -z "$SINK_1" ]; then
+        echo -e "${RED}Error: No sink selected for video player.${NC}"
+        exit 1
+    fi
+    echo "Selected sink for video player: $SINK_1"
+
+    echo -e "\n${BLUE}Select sink for Audio-Only Player (with audio track $AUDIO_ONLY_AID):${NC}"
+    SINK_2=$(select_sink "Audio-Only Player Sink")
+    if [ -z "$SINK_2" ]; then
+        echo -e "${RED}Error: No sink selected for audio-only player.${NC}"
+        exit 1
+    fi
+    echo "Selected sink for audio-only player: $SINK_2"
+    echo
+
+    # Set up cleanup on exit
+    trap cleanup EXIT
+
+    # Start video + first audio track on the specified sink
+    mpv --input-ipc-server="$MPVIPC1" --aid="$VIDEO_AID" --pause --fullscreen \
+        --audio-device=pulse/"$SINK_1" "$MOVIE" &
+    MPV1_PID=$!
+
+    # Start second audio track (no video) on headset #2
+    mpv --input-ipc-server="$MPVIPC2" --vid=no --aid="$AUDIO_ONLY_AID" --pause \
+        --audio-device=pulse/"$SINK_2" "$MOVIE" &
+    MPV2_PID=$!
+
+    # Wait for the first MPV's IPC socket to exist
+    while [ ! -S "$MPVIPC1" ]; do
+        # Check if the process is still running
+        if ! kill -0 "$MPV1_PID" 2>/dev/null; then
+            echo -e "${RED}Error: MPV instance 1 (PID $MPV1_PID) seems to have exited prematurely.${NC}"
+            # Attempt cleanup before exiting
+            kill "$MPV2_PID" 2>/dev/null
+            exit 1
+        fi
+        sleep 0.1 # Short sleep to avoid busy-waiting
+    done
+
+    # Wait for the second MPV's IPC socket to exist
+    while [ ! -S "$MPVIPC2" ]; do
+        # Check if the process is still running
+        if ! kill -0 "$MPV2_PID" 2>/dev/null; then
+            echo -e "${RED}Error: MPV instance 2 (PID $MPV2_PID) seems to have exited prematurely.${NC}"
+            # Attempt cleanup before exiting
+            kill "$MPV1_PID" 2>/dev/null
+            exit 1
+        fi
+        sleep 0.1 # Short sleep to avoid busy-waiting
+    done
+
+    # Start playback with delay compensation
+    if (( $(echo "$DELAY_COMPENSATION > 0" | bc -l) )); then
+        # Positive delay: delay the audio-only player
+        echo -e "${BLUE}Starting playback with ${DELAY_COMPENSATION}s delay to audio-only player...${NC}"
+        
+        # Start video player first
+        mpv_ipc_cmd "$MPVIPC1" '["set_property", "pause", false]'
+        
+        # Wait for the delay period
+        sleep "$DELAY_COMPENSATION"
+        
+        # Then start audio-only player
+        mpv_ipc_cmd "$MPVIPC2" '["set_property", "pause", false]'
+    else
+        # Negative delay: start audio-only player earlier
+        # Calculate absolute delay value
+        ABS_DELAY=$(awk "BEGIN {printf \"%.3f\", -1 * $DELAY_COMPENSATION}")
+        echo -e "${BLUE}Starting audio-only player ${ABS_DELAY}s earlier...${NC}"
+        
+        # Start audio-only player first
+        mpv_ipc_cmd "$MPVIPC2" '["set_property", "pause", false]'
+        
+        # Wait for the delay period
+        sleep "$ABS_DELAY"
+        
+        # Then start video player
+        mpv_ipc_cmd "$MPVIPC1" '["set_property", "pause", false]'
+    fi
+
+    # Wait for the MPV processes to exit
+    echo -e "${GREEN}MPV instances running (PID $MPV1_PID, $MPV2_PID).${NC}"
+    echo -e "To control playback, run: ${YELLOW}$0 control${NC}"
+    echo -e "Or press ${YELLOW}Ctrl+C${NC} to stop."
+    wait "$MPV1_PID" "$MPV2_PID"
+
+    echo "MPV processes finished."
+}
+
+# --- Control Mode Functions ---
+
+# Function to apply delay compensation
+apply_delay_compensation() {
+    echo "Applying new delay compensation (${DELAY_COMPENSATION}s)..."
+    
+    # First pause both instances
+    echo "Pausing playback to resync..."
+    mpv_ipc_cmd "$MPVIPC1" '["set_property", "pause", true]'
+    mpv_ipc_cmd "$MPVIPC2" '["set_property", "pause", true]'
+    
+    # Check if delay is effectively zero (to avoid sleep errors)
+    if (( $(echo "$DELAY_COMPENSATION > -0.001 && $DELAY_COMPENSATION < 0.001" | bc -l) )); then
+        echo "Delay compensation is effectively zero, resuming both players simultaneously..."
+        mpv_ipc_cmd "$MPVIPC1" '["set_property", "pause", false]'
+        mpv_ipc_cmd "$MPVIPC2" '["set_property", "pause", false]'
+    elif (( $(echo "$DELAY_COMPENSATION > 0" | bc -l) )); then
+        # Positive delay: delay the audio-only player
+        echo "Resuming with ${DELAY_COMPENSATION}s delay to audio-only player..."
+        
+        # Resume video player first
+        mpv_ipc_cmd "$MPVIPC1" '["set_property", "pause", false]'
+        
+        # Wait for the delay period
+        sleep "$DELAY_COMPENSATION"
+        
+        # Then resume audio-only player
+        mpv_ipc_cmd "$MPVIPC2" '["set_property", "pause", false]'
+    else
+        # Negative delay: start audio-only player earlier
+        # Calculate absolute delay value
+        ABS_DELAY=$(awk "BEGIN {printf \"%.3f\", -1 * $DELAY_COMPENSATION}")
+        echo "Resuming with audio-only player ${ABS_DELAY}s earlier..."
+        
+        # Resume audio-only player first
+        mpv_ipc_cmd "$MPVIPC2" '["set_property", "pause", false]'
+        
+        # Wait for the delay period
+        sleep "$ABS_DELAY"
+        
+        # Then resume video player
+        mpv_ipc_cmd "$MPVIPC1" '["set_property", "pause", false]'
+    fi
+}
+
+# Control running MPV instances
+control_mode() {
+    # No need to check for arguments as we're using fixed socket paths
+
+    # Load delay compensation settings
+    load_delay_compensation
+
+    # Check if sockets exist
+    if [ ! -S "$MPVIPC1" ] || [ ! -S "$MPVIPC2" ]; then
+        echo -e "${RED}Error: Could not find IPC sockets:${NC}"
+        echo "  $MPVIPC1"
+        echo "  $MPVIPC2"
+        echo -e "Is ${YELLOW}$0 play${NC} running?"
+        exit 1
+    fi
+
+    echo -e "${GREEN}Found IPC sockets:${NC}"
+    echo "  Video Player: $MPVIPC1"
+    echo "  Audio-Only Player: $MPVIPC2"
+    echo "---"
+
+    # Control loop
+    while true; do
+        # Check if stdin is a terminal before using read -p
+        if [ -t 0 ]; then
+            read -r -p "Enter command (play/pause/seek <seconds>/delay <seconds>/+ | ++ | - | --/quit): " command_input
+            read_status=$?
+            if [ $read_status -ne 0 ]; then
+                echo -e "${RED}Error reading command (status: $read_status). Exiting.${NC}"
+                exit 1 # Exit if read fails (e.g., EOF)
+            fi
+        else
+            echo -e "${RED}Error: Standard input is not a terminal. Cannot read commands interactively.${NC}"
+            exit 1
+        fi
+
+        # Parse command into action and value
+        command_action=$(echo "$command_input" | awk '{print $1}')
+        command_value=$(echo "$command_input" | awk '{print $2}')
+
+        case "$command_action" in
+            play)
+                echo "Sending PLAY command..."
+                mpv_ipc_cmd "$MPVIPC1" '["set_property", "pause", false]'
+                mpv_ipc_cmd "$MPVIPC2" '["set_property", "pause", false]'
+                ;;
+            pause)
+                echo "Sending PAUSE command..."
+                mpv_ipc_cmd "$MPVIPC1" '["set_property", "pause", true]'
+                mpv_ipc_cmd "$MPVIPC2" '["set_property", "pause", true]'
+                ;;
+            "+")
+                # Increase delay by small step
+                DELAY_COMPENSATION=$(awk "BEGIN {printf \"%.3f\", $DELAY_COMPENSATION + $DELAY_STEP}")
+                echo "Increased delay compensation to ${DELAY_COMPENSATION}s"
+                echo "$DELAY_COMPENSATION" > "$CONFIG_FILE"
+                apply_delay_compensation
+                ;;
+            "++")
+                # Increase delay by medium step
+                DELAY_COMPENSATION=$(awk "BEGIN {printf \"%.3f\", $DELAY_COMPENSATION + ($DELAY_STEP * 2)}")
+                echo "Increased delay compensation to ${DELAY_COMPENSATION}s"
+                echo "$DELAY_COMPENSATION" > "$CONFIG_FILE"
+                apply_delay_compensation
+                ;;
+            "+++")
+                # Increase delay by large step
+                DELAY_COMPENSATION=$(awk "BEGIN {printf \"%.3f\", $DELAY_COMPENSATION + ($DELAY_STEP * 4)}")
+                echo "Increased delay compensation to ${DELAY_COMPENSATION}s"
+                echo "$DELAY_COMPENSATION" > "$CONFIG_FILE"
+                apply_delay_compensation
+                ;;
+            "-")
+                # Decrease delay by small step
+                DELAY_COMPENSATION=$(awk "BEGIN {printf \"%.3f\", $DELAY_COMPENSATION - $DELAY_STEP}")
+                echo "Decreased delay compensation to ${DELAY_COMPENSATION}s"
+                echo "$DELAY_COMPENSATION" > "$CONFIG_FILE"
+                apply_delay_compensation
+                ;;
+            "--")
+                # Decrease delay by medium step
+                DELAY_COMPENSATION=$(awk "BEGIN {printf \"%.3f\", $DELAY_COMPENSATION - ($DELAY_STEP * 2)}")
+                echo "Decreased delay compensation to ${DELAY_COMPENSATION}s"
+                echo "$DELAY_COMPENSATION" > "$CONFIG_FILE"
+                apply_delay_compensation
+                ;;
+            "---")
+                # Decrease delay by large step
+                DELAY_COMPENSATION=$(awk "BEGIN {printf \"%.3f\", $DELAY_COMPENSATION - ($DELAY_STEP * 4)}")
+                echo "Decreased delay compensation to ${DELAY_COMPENSATION}s"
+                echo "$DELAY_COMPENSATION" > "$CONFIG_FILE"
+                apply_delay_compensation
+                ;;
+            delay)
+                # Set a specific delay compensation value
+                if [[ "$command_value" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
+                    DELAY_COMPENSATION=$command_value
+                    echo "Set delay compensation to ${DELAY_COMPENSATION}s"
+                    # Save to config file
+                    echo "$DELAY_COMPENSATION" > "$CONFIG_FILE"
+                    apply_delay_compensation
+                else
+                    echo "Current delay compensation: ${DELAY_COMPENSATION}s"
+                    echo "Usage: delay <seconds>"
+                    echo "  Positive: Audio-only player is delayed"
+                    echo "  Negative: Audio-only player starts earlier"
+                fi
+                ;;
+            seek)
+                # Validate input for seek time
+                if ! [[ "$command_value" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
+                    echo "Invalid seek time. Use format: seek <seconds>"
+                    continue # Skip to next loop iteration
+                fi
+
+                echo "Pausing..."
+                mpv_ipc_cmd "$MPVIPC1" '["set_property", "pause", true]'
+                mpv_ipc_cmd "$MPVIPC2" '["set_property", "pause", true]'
+
+                echo "Sending SEEK command ($command_value seconds)..."
+                # Use absolute seek for both instances
+                mpv_ipc_cmd "$MPVIPC1" "[\"seek\", $command_value, \"absolute\"]"
+                mpv_ipc_cmd "$MPVIPC2" "[\"seek\", $command_value, \"absolute\"]"
+
+                # Apply delay compensation
+                apply_delay_compensation
+                ;;
+            quit)
+                echo "Sending QUIT command to MPV instances..."
+                mpv_ipc_cmd "$MPVIPC1" '["quit"]'
+                mpv_ipc_cmd "$MPVIPC2" '["quit"]'
+                echo "Quit commands sent. Exiting control script."
+                exit 0
+                ;;
+            *)
+                # Handle empty input gracefully
+                if [[ -z "$command_action" ]]; then
+                    continue # Just loop again if user presses Enter
+                fi
+                echo -e "${YELLOW}Invalid command: '$command_action'${NC}"
+                echo "Available commands:"
+                echo "  play - Resume playback"
+                echo "  pause - Pause playback"
+                echo "  seek <seconds> - Seek to position (absolute)"
+                echo "  delay <seconds> - Set audio synchronization delay directly"
+                echo "  + - Increase delay by 0.1s"
+                echo "  ++ - Increase delay by 0.2s"
+                echo "  +++ - Increase delay by 0.4s"
+                echo "  - - Decrease delay by 0.1s"
+                echo "  -- - Decrease delay by 0.2s"
+                echo "  --- - Decrease delay by 0.4s"
+                echo "  quit - Exit MPV instances"
+                ;;
+        esac
+    done
+}
+
+# --- Help Mode ---
+show_help() {
+    echo "Usage: $0 <command> [options]"
+    echo ""
+    echo "Commands:"
+    echo "  play <movie_file> <video_aid> <audio_only_aid>"
+    echo "      Start dual audio playback with the given audio tracks."
+    echo "      You will be prompted to select audio sinks interactively."
+    echo ""
+    echo "  control"
+    echo "      Control a running dual audio playback session."
+    echo ""
+    echo "  help"
+    echo "      Show this help message."
+    echo ""
+    echo "Examples:"
+    echo "  $0 play \"movie.mkv\" 1 2"
+    echo "  $0 control"
+    echo ""
+    echo "For more information, see the README.md file."
+}
+
+# --- Main Execution ---
+
+# Check if we have a command
+if [ $# -lt 1 ]; then
+    show_help
+    exit 1
+fi
+
+# Parse command
+command="$1"
+shift # Remove command from arguments
+
+case "$command" in
+    play)
+        check_dependencies "play"
+        play_mode "$@"
+        ;;
+    control)
+        check_dependencies "control"
+        control_mode
+        ;;
+    help|-h|--help)
+        show_help
+        ;;
+    *)
+        echo -e "${RED}Unknown command: $command${NC}"
+        show_help
+        exit 1
+        ;;
+esac
