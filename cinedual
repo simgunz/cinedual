@@ -303,9 +303,132 @@ apply_delay_compensation() {
     fi
 }
 
+# Function to execute a command
+execute_command() {
+    local command_action="$1"
+    local command_value="$2"
+
+    case "$command_action" in
+        play)
+            echo "Sending PLAY command..."
+            mpv_ipc_cmd "$MPVIPC1" '["set_property", "pause", false]'
+            mpv_ipc_cmd "$MPVIPC2" '["set_property", "pause", false]'
+            ;;
+        pause)
+            echo "Sending PAUSE command..."
+            mpv_ipc_cmd "$MPVIPC1" '["set_property", "pause", true]'
+            mpv_ipc_cmd "$MPVIPC2" '["set_property", "pause", true]'
+            ;;
+        "+")
+            # Increase delay by small step
+            DELAY_COMPENSATION=$(awk "BEGIN {printf \"%.3f\", $DELAY_COMPENSATION + $DELAY_STEP}")
+            echo "Increased delay compensation to ${DELAY_COMPENSATION}s"
+            echo "$DELAY_COMPENSATION" > "$CONFIG_FILE"
+            apply_delay_compensation
+            ;;
+        "++")
+            # Increase delay by medium step
+            DELAY_COMPENSATION=$(awk "BEGIN {printf \"%.3f\", $DELAY_COMPENSATION + ($DELAY_STEP * 2)}")
+            echo "Increased delay compensation to ${DELAY_COMPENSATION}s"
+            echo "$DELAY_COMPENSATION" > "$CONFIG_FILE"
+            apply_delay_compensation
+            ;;
+        "+++")
+            # Increase delay by large step
+            DELAY_COMPENSATION=$(awk "BEGIN {printf \"%.3f\", $DELAY_COMPENSATION + ($DELAY_STEP * 4)}")
+            echo "Increased delay compensation to ${DELAY_COMPENSATION}s"
+            echo "$DELAY_COMPENSATION" > "$CONFIG_FILE"
+            apply_delay_compensation
+            ;;
+        "-")
+            # Decrease delay by small step
+            DELAY_COMPENSATION=$(awk "BEGIN {printf \"%.3f\", $DELAY_COMPENSATION - $DELAY_STEP}")
+            echo "Decreased delay compensation to ${DELAY_COMPENSATION}s"
+            echo "$DELAY_COMPENSATION" > "$CONFIG_FILE"
+            apply_delay_compensation
+            ;;
+        "--")
+            # Decrease delay by medium step
+            DELAY_COMPENSATION=$(awk "BEGIN {printf \"%.3f\", $DELAY_COMPENSATION - ($DELAY_STEP * 2)}")
+            echo "Decreased delay compensation to ${DELAY_COMPENSATION}s"
+            echo "$DELAY_COMPENSATION" > "$CONFIG_FILE"
+            apply_delay_compensation
+            ;;
+        "---")
+            # Decrease delay by large step
+            DELAY_COMPENSATION=$(awk "BEGIN {printf \"%.3f\", $DELAY_COMPENSATION - ($DELAY_STEP * 4)}")
+            echo "Decreased delay compensation to ${DELAY_COMPENSATION}s"
+            echo "$DELAY_COMPENSATION" > "$CONFIG_FILE"
+            apply_delay_compensation
+            ;;
+        delay)
+            # Set a specific delay compensation value
+            if [[ "$command_value" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
+                DELAY_COMPENSATION=$command_value
+                echo "Set delay compensation to ${DELAY_COMPENSATION}s"
+                # Save to config file
+                echo "$DELAY_COMPENSATION" > "$CONFIG_FILE"
+                apply_delay_compensation
+            else
+                echo "Current delay compensation: ${DELAY_COMPENSATION}s"
+                echo "Usage: delay <seconds>"
+                echo "  Positive: Audio-only player is delayed"
+                echo "  Negative: Audio-only player starts earlier"
+            fi
+            ;;
+        seek)
+            # Validate input for seek time
+            if ! [[ "$command_value" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
+                echo "Invalid seek time. Use format: seek <seconds>"
+                return # Skip to next loop iteration
+            fi
+
+            echo "Pausing..."
+            mpv_ipc_cmd "$MPVIPC1" '["set_property", "pause", true]'
+            mpv_ipc_cmd "$MPVIPC2" '["set_property", "pause", true]'
+
+            echo "Sending SEEK command ($command_value seconds)..."
+            # Use absolute seek for both instances
+            mpv_ipc_cmd "$MPVIPC1" "[\"seek\", $command_value, \"absolute\"]"
+            mpv_ipc_cmd "$MPVIPC2" "[\"seek\", $command_value, \"absolute\"]"
+
+            # Apply delay compensation
+            apply_delay_compensation
+            ;;
+        quit)
+            echo "Sending QUIT command to MPV instances..."
+            mpv_ipc_cmd "$MPVIPC1" '["quit"]'
+            mpv_ipc_cmd "$MPVIPC2" '["quit"]'
+            echo "Quit commands sent. Exiting control script."
+            exit 0
+            ;;
+        *)
+            # Handle empty input gracefully
+            if [[ -z "$command_action" ]]; then
+                return # Just loop again if user presses Enter
+            fi
+            echo -e "${YELLOW}Invalid command: '$command_action'${NC}"
+            echo "Available commands:"
+            echo "  play - Resume playback"
+            echo "  pause - Pause playback"
+            echo "  seek <seconds> - Seek to position (absolute)"
+            echo "  delay <seconds> - Set audio synchronization delay directly"
+            echo "  + - Increase delay by 0.1s"
+            echo "  ++ - Increase delay by 0.2s"
+            echo "  +++ - Increase delay by 0.4s"
+            echo "  - - Decrease delay by 0.1s"
+            echo "  -- - Decrease delay by 0.2s"
+            echo "  --- - Decrease delay by 0.4s"
+            echo "  quit - Exit MPV instances"
+            ;;
+    esac
+}
+
 # Control running MPV instances
 control_mode() {
-    # No need to check for arguments as we're using fixed socket paths
+    # Check if a direct command was provided
+    local direct_command="$1"
+    local direct_value="$2"
 
     # Load delay compensation settings
     load_delay_compensation
@@ -319,6 +442,14 @@ control_mode() {
         exit 1
     fi
 
+    # If running in direct command mode
+    if [ -n "$direct_command" ]; then
+        echo -e "${GREEN}Executing command: $direct_command ${direct_value:-}${NC}"
+        execute_command "$direct_command" "$direct_value"
+        exit 0 # Exit after executing the command
+    fi
+
+    # Otherwise, run in interactive mode
     echo -e "${GREEN}Found IPC sockets:${NC}"
     echo "  Video Player: $MPVIPC1"
     echo "  Audio-Only Player: $MPVIPC2"
@@ -343,120 +474,8 @@ control_mode() {
         command_action=$(echo "$command_input" | awk '{print $1}')
         command_value=$(echo "$command_input" | awk '{print $2}')
 
-        case "$command_action" in
-            play)
-                echo "Sending PLAY command..."
-                mpv_ipc_cmd "$MPVIPC1" '["set_property", "pause", false]'
-                mpv_ipc_cmd "$MPVIPC2" '["set_property", "pause", false]'
-                ;;
-            pause)
-                echo "Sending PAUSE command..."
-                mpv_ipc_cmd "$MPVIPC1" '["set_property", "pause", true]'
-                mpv_ipc_cmd "$MPVIPC2" '["set_property", "pause", true]'
-                ;;
-            "+")
-                # Increase delay by small step
-                DELAY_COMPENSATION=$(awk "BEGIN {printf \"%.3f\", $DELAY_COMPENSATION + $DELAY_STEP}")
-                echo "Increased delay compensation to ${DELAY_COMPENSATION}s"
-                echo "$DELAY_COMPENSATION" > "$CONFIG_FILE"
-                apply_delay_compensation
-                ;;
-            "++")
-                # Increase delay by medium step
-                DELAY_COMPENSATION=$(awk "BEGIN {printf \"%.3f\", $DELAY_COMPENSATION + ($DELAY_STEP * 2)}")
-                echo "Increased delay compensation to ${DELAY_COMPENSATION}s"
-                echo "$DELAY_COMPENSATION" > "$CONFIG_FILE"
-                apply_delay_compensation
-                ;;
-            "+++")
-                # Increase delay by large step
-                DELAY_COMPENSATION=$(awk "BEGIN {printf \"%.3f\", $DELAY_COMPENSATION + ($DELAY_STEP * 4)}")
-                echo "Increased delay compensation to ${DELAY_COMPENSATION}s"
-                echo "$DELAY_COMPENSATION" > "$CONFIG_FILE"
-                apply_delay_compensation
-                ;;
-            "-")
-                # Decrease delay by small step
-                DELAY_COMPENSATION=$(awk "BEGIN {printf \"%.3f\", $DELAY_COMPENSATION - $DELAY_STEP}")
-                echo "Decreased delay compensation to ${DELAY_COMPENSATION}s"
-                echo "$DELAY_COMPENSATION" > "$CONFIG_FILE"
-                apply_delay_compensation
-                ;;
-            "--")
-                # Decrease delay by medium step
-                DELAY_COMPENSATION=$(awk "BEGIN {printf \"%.3f\", $DELAY_COMPENSATION - ($DELAY_STEP * 2)}")
-                echo "Decreased delay compensation to ${DELAY_COMPENSATION}s"
-                echo "$DELAY_COMPENSATION" > "$CONFIG_FILE"
-                apply_delay_compensation
-                ;;
-            "---")
-                # Decrease delay by large step
-                DELAY_COMPENSATION=$(awk "BEGIN {printf \"%.3f\", $DELAY_COMPENSATION - ($DELAY_STEP * 4)}")
-                echo "Decreased delay compensation to ${DELAY_COMPENSATION}s"
-                echo "$DELAY_COMPENSATION" > "$CONFIG_FILE"
-                apply_delay_compensation
-                ;;
-            delay)
-                # Set a specific delay compensation value
-                if [[ "$command_value" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
-                    DELAY_COMPENSATION=$command_value
-                    echo "Set delay compensation to ${DELAY_COMPENSATION}s"
-                    # Save to config file
-                    echo "$DELAY_COMPENSATION" > "$CONFIG_FILE"
-                    apply_delay_compensation
-                else
-                    echo "Current delay compensation: ${DELAY_COMPENSATION}s"
-                    echo "Usage: delay <seconds>"
-                    echo "  Positive: Audio-only player is delayed"
-                    echo "  Negative: Audio-only player starts earlier"
-                fi
-                ;;
-            seek)
-                # Validate input for seek time
-                if ! [[ "$command_value" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
-                    echo "Invalid seek time. Use format: seek <seconds>"
-                    continue # Skip to next loop iteration
-                fi
-
-                echo "Pausing..."
-                mpv_ipc_cmd "$MPVIPC1" '["set_property", "pause", true]'
-                mpv_ipc_cmd "$MPVIPC2" '["set_property", "pause", true]'
-
-                echo "Sending SEEK command ($command_value seconds)..."
-                # Use absolute seek for both instances
-                mpv_ipc_cmd "$MPVIPC1" "[\"seek\", $command_value, \"absolute\"]"
-                mpv_ipc_cmd "$MPVIPC2" "[\"seek\", $command_value, \"absolute\"]"
-
-                # Apply delay compensation
-                apply_delay_compensation
-                ;;
-            quit)
-                echo "Sending QUIT command to MPV instances..."
-                mpv_ipc_cmd "$MPVIPC1" '["quit"]'
-                mpv_ipc_cmd "$MPVIPC2" '["quit"]'
-                echo "Quit commands sent. Exiting control script."
-                exit 0
-                ;;
-            *)
-                # Handle empty input gracefully
-                if [[ -z "$command_action" ]]; then
-                    continue # Just loop again if user presses Enter
-                fi
-                echo -e "${YELLOW}Invalid command: '$command_action'${NC}"
-                echo "Available commands:"
-                echo "  play - Resume playback"
-                echo "  pause - Pause playback"
-                echo "  seek <seconds> - Seek to position (absolute)"
-                echo "  delay <seconds> - Set audio synchronization delay directly"
-                echo "  + - Increase delay by 0.1s"
-                echo "  ++ - Increase delay by 0.2s"
-                echo "  +++ - Increase delay by 0.4s"
-                echo "  - - Decrease delay by 0.1s"
-                echo "  -- - Decrease delay by 0.2s"
-                echo "  --- - Decrease delay by 0.4s"
-                echo "  quit - Exit MPV instances"
-                ;;
-        esac
+        # Execute the command
+        execute_command "$command_action" "$command_value"
     done
 }
 
@@ -469,15 +488,29 @@ show_help() {
     echo "      Start dual audio playback with the given audio tracks."
     echo "      You will be prompted to select audio sinks interactively."
     echo ""
-    echo "  control"
+    echo "  control [command] [value]"
     echo "      Control a running dual audio playback session."
+    echo "      - Without arguments: Enter interactive control mode"
+    echo "      - With command: Execute a single command and exit"
+    echo ""
+    echo "      Available commands:"
+    echo "        play - Resume playback"
+    echo "        pause - Pause playback"
+    echo "        seek <seconds> - Seek to position (absolute)"
+    echo "        delay <seconds> - Set audio synchronization delay"
+    echo "        + | ++ | +++ - Increase delay by small/medium/large steps"
+    echo "        - | -- | --- - Decrease delay by small/medium/large steps"
+    echo "        quit - Exit MPV instances"
     echo ""
     echo "  help"
     echo "      Show this help message."
     echo ""
     echo "Examples:"
     echo "  $0 play \"movie.mkv\" 1 2"
-    echo "  $0 control"
+    echo "  $0 control                    # Interactive mode"
+    echo "  $0 control play               # Resume playback and exit"
+    echo "  $0 control seek 300           # Seek to 5 minutes and exit"
+    echo "  $0 control delay 0.3          # Set delay to 300ms and exit"
     echo ""
     echo "For more information, see the README.md file."
 }
@@ -501,7 +534,7 @@ case "$command" in
         ;;
     control)
         check_dependencies "control"
-        control_mode
+        control_mode "$@"
         ;;
     help|-h|--help)
         show_help
