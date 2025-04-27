@@ -156,8 +156,6 @@ play_mode() {
         echo "  <audio_only_aid>: Audio track ID for the audio-only player (default: 2)."
         echo ""
         echo "You will be prompted to select audio sinks interactively."
-        echo ""
-        echo "To find audio track IDs, run: mpv --list-tracks \"movie.mkv\""
         exit 1
     fi
 
