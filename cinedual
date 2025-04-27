@@ -319,49 +319,21 @@ execute_command() {
             mpv_ipc_cmd "$MPVIPC1" '["set_property", "pause", true]'
             mpv_ipc_cmd "$MPVIPC2" '["set_property", "pause", true]'
             ;;
-        "+")
-            # Increase delay by small step
+        increase_delay|"+")
+            # Increase delay by step
             DELAY_COMPENSATION=$(awk "BEGIN {printf \"%.3f\", $DELAY_COMPENSATION + $DELAY_STEP}")
             echo "Increased delay compensation to ${DELAY_COMPENSATION}s"
             echo "$DELAY_COMPENSATION" > "$CONFIG_FILE"
             apply_delay_compensation
             ;;
-        "++")
-            # Increase delay by medium step
-            DELAY_COMPENSATION=$(awk "BEGIN {printf \"%.3f\", $DELAY_COMPENSATION + ($DELAY_STEP * 2)}")
-            echo "Increased delay compensation to ${DELAY_COMPENSATION}s"
-            echo "$DELAY_COMPENSATION" > "$CONFIG_FILE"
-            apply_delay_compensation
-            ;;
-        "+++")
-            # Increase delay by large step
-            DELAY_COMPENSATION=$(awk "BEGIN {printf \"%.3f\", $DELAY_COMPENSATION + ($DELAY_STEP * 4)}")
-            echo "Increased delay compensation to ${DELAY_COMPENSATION}s"
-            echo "$DELAY_COMPENSATION" > "$CONFIG_FILE"
-            apply_delay_compensation
-            ;;
-        "-")
-            # Decrease delay by small step
+        decrease_delay|"-")
+            # Decrease delay by step
             DELAY_COMPENSATION=$(awk "BEGIN {printf \"%.3f\", $DELAY_COMPENSATION - $DELAY_STEP}")
             echo "Decreased delay compensation to ${DELAY_COMPENSATION}s"
             echo "$DELAY_COMPENSATION" > "$CONFIG_FILE"
             apply_delay_compensation
             ;;
-        "--")
-            # Decrease delay by medium step
-            DELAY_COMPENSATION=$(awk "BEGIN {printf \"%.3f\", $DELAY_COMPENSATION - ($DELAY_STEP * 2)}")
-            echo "Decreased delay compensation to ${DELAY_COMPENSATION}s"
-            echo "$DELAY_COMPENSATION" > "$CONFIG_FILE"
-            apply_delay_compensation
-            ;;
-        "---")
-            # Decrease delay by large step
-            DELAY_COMPENSATION=$(awk "BEGIN {printf \"%.3f\", $DELAY_COMPENSATION - ($DELAY_STEP * 4)}")
-            echo "Decreased delay compensation to ${DELAY_COMPENSATION}s"
-            echo "$DELAY_COMPENSATION" > "$CONFIG_FILE"
-            apply_delay_compensation
-            ;;
-        delay)
+        set_delay|delay)
             # Set a specific delay compensation value
             if [[ "$command_value" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
                 DELAY_COMPENSATION=$command_value
@@ -371,7 +343,7 @@ execute_command() {
                 apply_delay_compensation
             else
                 echo "Current delay compensation: ${DELAY_COMPENSATION}s"
-                echo "Usage: delay <seconds>"
+                echo "Usage: set_delay <seconds>"
                 echo "  Positive: Audio-only player is delayed"
                 echo "  Negative: Audio-only player starts earlier"
             fi
@@ -412,13 +384,9 @@ execute_command() {
             echo "  play - Resume playback"
             echo "  pause - Pause playback"
             echo "  seek <seconds> - Seek to position (absolute)"
-            echo "  delay <seconds> - Set audio synchronization delay directly"
-            echo "  + - Increase delay by 0.1s"
-            echo "  ++ - Increase delay by 0.2s"
-            echo "  +++ - Increase delay by 0.4s"
-            echo "  - - Decrease delay by 0.1s"
-            echo "  -- - Decrease delay by 0.2s"
-            echo "  --- - Decrease delay by 0.4s"
+            echo "  set_delay <seconds> - Set audio synchronization delay directly"
+            echo "  increase_delay - Increase delay by ${DELAY_STEP}s"
+            echo "  decrease_delay - Decrease delay by ${DELAY_STEP}s"
             echo "  quit - Exit MPV instances"
             ;;
     esac
@@ -435,13 +403,9 @@ select_command() {
     echo -e "play\tResume playback" >> "$tmpfile"
     echo -e "pause\tPause playback" >> "$tmpfile"
     echo -e "seek\tSeek to position (seconds)" >> "$tmpfile"
-    echo -e "delay\tSet audio sync delay directly (current: ${current_delay}s)" >> "$tmpfile"
-    echo -e "+\tIncrease delay by 0.1s" >> "$tmpfile"
-    echo -e "++\tIncrease delay by 0.2s" >> "$tmpfile"
-    echo -e "+++\tIncrease delay by 0.4s" >> "$tmpfile"
-    echo -e "-\tDecrease delay by 0.1s" >> "$tmpfile"
-    echo -e "--\tDecrease delay by 0.2s" >> "$tmpfile"
-    echo -e "---\tDecrease delay by 0.4s" >> "$tmpfile"
+    echo -e "set_delay\tSet audio sync delay directly (current: ${current_delay}s)" >> "$tmpfile"
+    echo -e "increase_delay\tIncrease delay by ${DELAY_STEP}s" >> "$tmpfile"
+    echo -e "decrease_delay\tDecrease delay by ${DELAY_STEP}s" >> "$tmpfile"
     echo -e "quit\tExit MPV instances" >> "$tmpfile"
     
     # Use fzf for selection
@@ -539,7 +503,7 @@ control_mode() {
                     echo -e "${RED}Invalid seek time. Try again.${NC}"
                     continue
                 fi
-            elif [[ "$command_action" == "delay" ]]; then
+            elif [[ "$command_action" == "set_delay" ]]; then
                 command_value=$(prompt_for_value "$command_action" "Enter delay value in seconds. Current: ${DELAY_COMPENSATION}s. Press Enter when done.")
                 # Validate the delay value
                 if ! [[ "$command_value" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
@@ -581,9 +545,9 @@ show_help() {
     echo "        play - Resume playback"
     echo "        pause - Pause playback"
     echo "        seek <seconds> - Seek to position (absolute)"
-    echo "        delay <seconds> - Set audio synchronization delay"
-    echo "        + | ++ | +++ - Increase delay by small/medium/large steps"
-    echo "        - | -- | --- - Decrease delay by small/medium/large steps"
+    echo "        set_delay <seconds> - Set audio synchronization delay"
+    echo "        increase_delay - Increase delay by ${DELAY_STEP}s"
+    echo "        decrease_delay - Decrease delay by ${DELAY_STEP}s"
     echo "        quit - Exit MPV instances"
     echo ""
     echo "  help"
@@ -594,7 +558,7 @@ show_help() {
     echo "  $0 control                    # Interactive mode"
     echo "  $0 control play               # Resume playback and exit"
     echo "  $0 control seek 300           # Seek to 5 minutes and exit"
-    echo "  $0 control delay 0.3          # Set delay to 300ms and exit"
+    echo "  $0 control set_delay 0.3      # Set delay to 300ms and exit"
     echo ""
     echo "For more information, see the README.md file."
 }
