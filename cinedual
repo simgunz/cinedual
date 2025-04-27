@@ -45,7 +45,7 @@ check_dependencies() {
         missing=1
     fi
     
-    if [ "$1" = "play" ] && ! command -v fzf &> /dev/null; then
+    if [[ "$1" = "play" || "$1" = "control" ]] && ! command -v fzf &> /dev/null; then
         echo -e "${RED}Error: fzf could not be found. Please install it.${NC}"
         missing=1
     fi
@@ -424,6 +424,65 @@ execute_command() {
     esac
 }
 
+# Function to select command using fzf
+select_command() {
+    local current_delay="$1"
+    
+    # Create a temporary file to store commands and descriptions
+    local tmpfile=$(mktemp)
+    
+    # Add basic commands
+    echo -e "play\tResume playback" >> "$tmpfile"
+    echo -e "pause\tPause playback" >> "$tmpfile"
+    echo -e "seek\tSeek to position (seconds)" >> "$tmpfile"
+    echo -e "delay\tSet audio sync delay directly (current: ${current_delay}s)" >> "$tmpfile"
+    echo -e "+\tIncrease delay by 0.1s" >> "$tmpfile"
+    echo -e "++\tIncrease delay by 0.2s" >> "$tmpfile"
+    echo -e "+++\tIncrease delay by 0.4s" >> "$tmpfile"
+    echo -e "-\tDecrease delay by 0.1s" >> "$tmpfile"
+    echo -e "--\tDecrease delay by 0.2s" >> "$tmpfile"
+    echo -e "---\tDecrease delay by 0.4s" >> "$tmpfile"
+    echo -e "quit\tExit MPV instances" >> "$tmpfile"
+    
+    # Use fzf for selection
+    local selection=""
+    selection=$(cat "$tmpfile" | fzf --prompt="Select command > " \
+        --header="Current delay: ${current_delay}s | Use arrow keys or type to search. Press Enter to select." \
+        --delimiter='\t' \
+        --with-nth=1,2 \
+        --preview-window=hidden)
+    
+    rm "$tmpfile"
+    
+    if [ -n "$selection" ]; then
+        # Extract just the command
+        echo "$selection" | cut -f1
+        return 0
+    else
+        echo "" # Return empty string if no selection
+        return 1
+    fi
+}
+
+# Function to prompt for a numeric value using fzf
+prompt_for_value() {
+    local prompt="$1"
+    local header="$2"
+    
+    # Create a temporary input file
+    local tmpfile=$(mktemp)
+    
+    # Build the fzf command as an array
+    local fzf_cmd=(fzf --print-query --prompt="$prompt > " --header="$header" --preview-window=hidden --height=3)
+    
+    # Execute fzf and get the first line (the query)
+    local result=$(echo "" | "${fzf_cmd[@]}" | head -n1)
+    
+    rm "$tmpfile"
+    
+    echo "$result"
+}
+
 # Control running MPV instances
 control_mode() {
     # Check if a direct command was provided
@@ -453,29 +512,54 @@ control_mode() {
     echo -e "${GREEN}Found IPC sockets:${NC}"
     echo "  Video Player: $MPVIPC1"
     echo "  Audio-Only Player: $MPVIPC2"
+    echo -e "${GREEN}Current delay compensation: ${DELAY_COMPENSATION}s${NC}"
     echo "---"
 
     # Control loop
     while true; do
-        # Check if stdin is a terminal before using read -p
+        # Check if stdin is a terminal before using fzf
         if [ -t 0 ]; then
-            read -r -p "Enter command (play/pause/seek <seconds>/delay <seconds>/+ | ++ | - | --/quit): " command_input
-            read_status=$?
-            if [ $read_status -ne 0 ]; then
-                echo -e "${RED}Error reading command (status: $read_status). Exiting.${NC}"
-                exit 1 # Exit if read fails (e.g., EOF)
+            # Use fzf to select command
+            command_action=$(select_command "$DELAY_COMPENSATION")
+            
+            # Handle empty selection (user pressed Esc)
+            if [ -z "$command_action" ]; then
+                echo -e "${YELLOW}No command selected. Try again or press Ctrl+C to exit.${NC}"
+                continue
             fi
+
+            # Initialize command_value as empty
+            command_value=""
+            
+            # If the command requires a value, prompt for it
+            if [[ "$command_action" == "seek" ]]; then
+                command_value=$(prompt_for_value "$command_action" "Enter position in seconds. Press Enter when done.")
+                # Validate the seek value
+                if ! [[ "$command_value" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
+                    echo -e "${RED}Invalid seek time. Try again.${NC}"
+                    continue
+                fi
+            elif [[ "$command_action" == "delay" ]]; then
+                command_value=$(prompt_for_value "$command_action" "Enter delay value in seconds. Current: ${DELAY_COMPENSATION}s. Press Enter when done.")
+                # Validate the delay value
+                if ! [[ "$command_value" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
+                    echo -e "${RED}Invalid delay value. Try again.${NC}"
+                    continue
+                fi
+            fi
+            
+            # Clear the screen for a cleaner interface
+            echo -e "\n"
+            
+            # Execute the command
+            execute_command "$command_action" "$command_value"
+            
+            # Add a small pause to see the feedback before showing the menu again
+            sleep 1
         else
-            echo -e "${RED}Error: Standard input is not a terminal. Cannot read commands interactively.${NC}"
+            echo -e "${RED}Error: Standard input is not a terminal. Cannot use interactive mode.${NC}"
             exit 1
         fi
-
-        # Parse command into action and value
-        command_action=$(echo "$command_input" | awk '{print $1}')
-        command_value=$(echo "$command_input" | awk '{print $2}')
-
-        # Execute the command
-        execute_command "$command_action" "$command_value"
     done
 }
 
