@@ -1,157 +1,99 @@
 # CineDual
 
-These scripts allow playing a single video file with two different audio tracks simultaneously outputting to two separate audio devices (sinks), keeping playback synchronized.
+A simple solution for playing a video with two different audio tracks simultaneously on separate output devices. Perfect for multilingual viewers or when one person needs audio description.
 
-## Purpose
+## Quick Start
 
-This is useful for scenarios like:
+```bash
+# Install required packages
+sudo apt install mpv socat fzf pulseaudio-utils  # Debian/Ubuntu
+# or
+sudo pacman -S mpv socat fzf pipewire-pulse      # Arch Linux
 
-*   Watching a movie with one person using speakers (e.g., original language) and another using headphones (e.g., dubbed language or audio description track).
-*   Any situation requiring two different audio streams from the same video file on separate outputs.
+# Start playback (defaults to tracks 1 & 2 if not specified)
+./cinedual play "movie.mkv"
+# Or specify audio tracks
+./cinedual play "movie.mkv" 1 2
 
-## Scripts
-
-1. **`dualplay.sh`** (Recommended):
-   * A unified script combining the functionality of both playsync.sh and controlsync.sh
-   * Uses subcommands for better organization:
-     * `play` - Start playback with two audio tracks
-     * `control` - Control an existing playback session
-   * Features interactive sink selection using `fzf`
-   * Includes audio synchronization tools
-
-2.  **`playsync.sh`**:
-    *   Starts two `mpv` instances.
-    *   Instance 1: Plays video + specified audio track on sink 1.
-    *   Instance 2: Plays specified audio track *only* (no video) on sink 2.
-    *   Uses IPC sockets (`/tmp/mpv_sync_*`) to allow control.
-    *   Features interactive sink selection using `fzf`.
-
-3.  **`controlsync.sh`**:
-    *   Connects to the IPC sockets created by a running `playsync.sh` instance.
-    *   Allows controlling playback (play/pause/seek/quit) from a separate terminal.
+# Control playback from another terminal
+./cinedual control
+```
 
 ## Requirements
 
-*   `mpv`: A versatile media player.
-*   `socat`: Utility for data transfer between channels, used here for IPC communication with `mpv`.
-*   `fzf`: Interactive fuzzy finder for sink selection.
-*   `pactl`: PulseAudio command-line utility (included with PulseAudio or PipeWire).
+- `mpv`: Media player
+- `socat`: IPC communication utility
+- `fzf`: Interactive selection tool
+- `pactl`: PulseAudio/PipeWire utility
 
-Install them on Debian/Ubuntu derivatives:
+## Features
+
+- Play video with different audio tracks on two audio devices
+- Interactive sink selection with fuzzy search
+- Synchronization controls to fine-tune audio timing
+- Remembers delay settings between sessions
+
+## Usage Details
+
+### Starting Playback
+
 ```bash
-sudo apt update
-sudo apt install mpv socat fzf pulseaudio-utils
+./cinedual play "movie.mkv" [<video_audio_id> <second_audio_id>]
 ```
-Or on Fedora:
+
+If audio tracks aren't specified, defaults to tracks 1 and 2. You'll be prompted to select output devices for each audio stream.
+
+### Controlling Playback
+
+Interactive mode:
 ```bash
-sudo dnf install mpv socat fzf pipewire-utils
+./cinedual control
 ```
 
-## Usage
+Direct commands:
+```bash
+./cinedual control play               # Resume playback
+./cinedual control pause              # Pause playback
+./cinedual control seek 300           # Jump to 5 minutes position
+./cinedual control set_delay 0.3      # Set 300ms audio sync delay
+./cinedual control increase_delay     # Increase audio sync delay by small step
+./cinedual control decrease_delay     # Decrease audio sync delay by small step
+./cinedual control quit               # Exit players
+```
 
-### Using the unified script (recommended)
+### Getting Help
 
-1.  **Find your audio track IDs (AID):**
-    Run `mpv --list-tracks "/path/to/your/movie.mkv"`.
-    
-    Look for the `id` field for audio tracks (e.g., `1`, `2`). Only numeric track IDs are supported.
-
-2.  **Start Playback:**
-    ```bash
-    ./dualplay.sh play "/path/to/your/movie.mkv" <video_aid> <audio_only_aid>
-    ```
-    
-    Example:
-    ```bash
-    ./dualplay.sh play "MyMovie.mkv" 1 2
-    ```
-
-3.  **Control Playback:**
-    Open a new terminal and run:
-    ```bash
-    ./dualplay.sh control "/path/to/your/movie.mkv"
-    ```
-    
-    **Available commands:**
-    - `play` - Resume playback
-    - `pause` - Pause playback
-    - `seek <seconds>` - Seek to a specific position in seconds
-    - `delay <seconds>` - Set audio synchronization delay directly
-    - `+` / `++` / `+++` - Increase audio delay by small/medium/large steps
-    - `-` / `--` / `---` - Decrease audio delay by small/medium/large steps
-    - `quit` - Exit MPV instances
-
-4.  **Get Help:**
-    ```bash
-    ./dualplay.sh help
-    ```
-
-### Using the separate scripts (legacy)
-
-1.  **Find your audio track IDs (AID):**
-    Run `mpv --list-tracks "/path/to/your/movie.mkv"`.
-    
-    Look for the `id` field for audio tracks (e.g., `1`, `2`). Only numeric track IDs are supported.
-
-2.  **Start Playback:**
-    Run [`playsync.sh`](playsync.sh) with the movie file and audio track IDs:
-    ```bash
-    ./playsync.sh "/path/to/your/movie.mkv" <video_aid> <audio_only_aid>
-    ```
-    
-    You will be prompted to interactively select audio sinks using `fzf`.
-    
-    *Examples:*
-    ```bash
-    ./playsync.sh "MyMovie.mkv" 1 2
-    ```
-    *(Where 1 is the first audio track for the video player, 2 is the second audio track for the audio-only player)*
-
-3.  **Control from another terminal:**
-    Open a new terminal and run [`controlsync.sh`](controlsync.sh) with the *exact same* movie file path:
-    ```bash
-    ./controlsync.sh "/path/to/your/movie.mkv"
-    ```
-    This script will find the running `mpv` instances and allow you to control them.
-
-    **Available commands in controlsync.sh:**
-    - `play` - Resume playback
-    - `pause` - Pause playback
-    - `seek <seconds>` - Seek to a specific position in seconds
-    - `delay <seconds>` - Set audio synchronization delay directly
-    - `+` - Increase audio delay by 0.1s (small adjustment)
-    - `++` - Increase audio delay by 0.2s (medium adjustment)
-    - `+++` - Increase audio delay by 0.4s (large adjustment)
-    - `-` - Decrease audio delay by 0.1s (small adjustment)
-    - `--` - Decrease audio delay by 0.2s (medium adjustment)
-    - `---` - Decrease audio delay by 0.4s (large adjustment)
-    - `quit` - Exit MPV instances
-
-    **Note:** The `quit` command only tells the `mpv` instances to exit. It does *not* stop the original [`playsync.sh`](playsync.sh) script. It's usually better to press `Ctrl+C` in the terminal running [`playsync.sh`](playsync.sh) to stop everything and clean up.
+```bash
+./cinedual help
+```
 
 ## Audio Synchronization
 
-After seeking to a different position in the video, you may notice that the audio tracks are not perfectly synchronized. The `controlsync.sh` script provides a delay compensation system to fix this:
+After seeking, audio tracks may need synchronization:
 
-- A positive delay value means the audio-only player is delayed relative to the video player
-- A negative delay value means the audio-only player starts earlier than the video player
+- **Adjust delay:** Use `set_delay` command (e.g., `set_delay 0.3`)
+- **Fine-tune:** Use `increase_delay` and `decrease_delay` commands
 
-**Methods to adjust synchronization:**
-1. Use `delay <seconds>` to set a specific delay value (e.g., `delay 0.3` or `delay -0.1`)
-2. Use dedicated commands for incremental adjustment:
-   - `+`, `++`, or `+++` to increase delay by small, medium, or large steps
-   - `-`, `--`, or `---` to decrease delay by small, medium, or large steps
+The delay value refers to the audio-only player relative to the video player:
+- Positive value: Audio-only player is delayed
+- Negative value: Audio-only player starts earlier
 
-The delay settings are automatically saved to `~/.config/mpv_dual_audio/delay_settings.conf` and will be remembered between sessions.
+While `increase_delay`, `decrease_delay`, and `set_delay` work in most cases, the most reliable way to realign tracks is to:
+1. Use `seek` to a nearby position
+2. Let the system apply the current delay setting automatically
 
-## How it Works
+For optimal lip synchronization, it's recommended to:
+- Place the original language track on the video player
+- Place the dubbed/translated track on the audio-only player
 
-The scripts launch two `mpv` processes: one for video and the specified video audio track, another for only the specified audio-only track. Both are started paused. It uses `--input-ipc-server` to create Unix domain sockets for each instance. After both sockets are ready, it sends commands via `socat` to unpause both instances with appropriate timing based on the delay compensation value.
+Delay settings are automatically saved between sessions.
 
-The control functionality connects to these sockets to control both players synchronously, and provides tools to adjust the synchronization delay in real-time.
+## How It Works
 
-## Customization
+CineDual launches two MPV instances:
+1. First plays video + primary audio track
+2. Second plays only the secondary audio track
 
-*   **Audio Tracks:** Audio tracks are specified as command-line arguments using numeric track IDs.
-*   **Audio Sinks:** Sinks are selected interactively using `fzf` when starting playback.
-*   **Delay Compensation:** The default delay is 0.2 seconds but can be adjusted as needed.
+The instances are synchronized through IPC sockets using precise timing calculations to ensure both audio tracks remain aligned throughout playback.
+
+Synchronization preferences are stored in `~/.config/cinedual/settings.conf`.
